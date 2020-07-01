@@ -205,7 +205,8 @@ struct ClientProfiler {
 		totalCounts_[statement]++;
 
 		if (CLIENT_PROFILER_DUMP_INTERVAL > 0) {
-			util::LockGuard<util::Mutex> lock(mutex_);
+			//util::LockGuard<util::Mutex> lock(mutex_);
+			mutex_.lock();
 			if (stopwatch_.elapsedMillis() >= CLIENT_PROFILER_DUMP_INTERVAL) {
 				dump();
 
@@ -214,6 +215,7 @@ struct ClientProfiler {
 				stopwatch_.reset();
 				stopwatch_.start();
 			}
+			mutex_.unlock();
 		}
 	}
 
@@ -4390,7 +4392,8 @@ const RowMapper* RowMapper::Cache::resolve(
 		bool general, const Config &config) {
 	const size_t digest = getDigest(
 			rowTypeCategory, binding, general, config.nullableAllowed_);
-	util::LockGuard<util::Mutex> lock(mutex_);
+	//util::LockGuard<util::Mutex> lock(mutex_);
+	mutex_.lock();
 
 	std::pair<EntryMapIterator, EntryMapIterator> range =
 			entryMap_.equal_range(digest);
@@ -4398,6 +4401,7 @@ const RowMapper* RowMapper::Cache::resolve(
 		RowMapper *mapper = it->second;
 		if (mapper->matches(rowTypeCategory, binding, general, config)) {
 			mapper->refCount_++;
+			mutex_.unlock();
 			return mapper;
 		}
 	}
@@ -4410,6 +4414,7 @@ const RowMapper* RowMapper::Cache::resolve(
 	mapper->setupAccessInfo(); 
 	mapper->refCount_++;
 	entryMap_.insert(std::make_pair(digest, mapper.get()));
+	mutex_.unlock();
 	return mapper.release();
 }
 
@@ -4417,7 +4422,8 @@ const RowMapper* RowMapper::Cache::resolve(
 		const RowMapper &baseMapper, ArrayByteInStream &schemaIn,
 		const Config &config, bool columnOrderIgnorable) {
 	const size_t digest = getDigest(baseMapper, schemaIn, config);
-	util::LockGuard<util::Mutex> lock(mutex_);
+	//util::LockGuard<util::Mutex> lock(mutex_);
+	mutex_.lock();
 
 	std::pair<EntryMapIterator, EntryMapIterator> range =
 			entryMap_.equal_range(digest);
@@ -4425,6 +4431,7 @@ const RowMapper* RowMapper::Cache::resolve(
 		RowMapper *mapper = it->second;
 		if (mapper->matches(baseMapper, schemaIn, config)) {
 			mapper->refCount_++;
+			mutex_.unlock();
 			return mapper;
 		}
 	}
@@ -4440,6 +4447,7 @@ const RowMapper* RowMapper::Cache::resolve(
 	mapper->refCount_++;
 
 	entryMap_.insert(std::make_pair(digest, mapper.get()));
+	mutex_.unlock();
 	return mapper.release();
 }
 
@@ -4457,17 +4465,19 @@ const RowMapper* RowMapper::Cache::resolve(
 
 const RowMapper* RowMapper::Cache::duplicate(const RowMapper &mapper) {
 	const size_t digest = mapper.digest_;
-	util::LockGuard<util::Mutex> lock(mutex_);
+	//util::LockGuard<util::Mutex> lock(mutex_);
+	mutex_.lock();
 
 	std::pair<EntryMapIterator, EntryMapIterator> range =
 			entryMap_.equal_range(digest);
 	for (EntryMapIterator it = range.first; it != range.second; ++it) {
 		if (it->second == &mapper) {
 			it->second->refCount_++;
+			mutex_.unlock();
 			return it->second;
 		}
 	}
-
+    mutex_.unlock();
 	GS_CLIENT_THROW_ERROR(GS_ERROR_CC_INTERNAL_ERROR, "");
 }
 
@@ -4475,7 +4485,8 @@ void RowMapper::Cache::release(const RowMapper **mapper) {
 	assert(mapper != NULL);
 	assert(*mapper != NULL);
 
-	util::LockGuard<util::Mutex> lock(mutex_);
+	//util::LockGuard<util::Mutex> lock(mutex_);
+	mutex_.lock();
 
 	std::pair<EntryMapIterator, EntryMapIterator> range =
 			entryMap_.equal_range((*mapper)->digest_);
@@ -4502,7 +4513,7 @@ void RowMapper::Cache::release(const RowMapper **mapper) {
 		entryMap_.erase(targetIt);
 		delete targetMapper;
 	}
-
+    mutex_.unlock();
 	*mapper = NULL;
 }
 
@@ -6177,23 +6188,27 @@ NodeConnectionPool::~NodeConnectionPool() {
 }
 
 size_t NodeConnectionPool::getMaxSize() {
-	util::LockGuard<util::Mutex> guard(mutex_);
+	//util::LockGuard<util::Mutex> guard(mutex_);
+	mutex_.lock();
+	mutex_.unlock();
 	return maxSize_;
 }
 
 void NodeConnectionPool::setMaxSize(size_t maxSize) {
 	{
-		util::LockGuard<util::Mutex> guard(mutex_);
+		//util::LockGuard<util::Mutex> guard(mutex_);
+		mutex_.lock();
 		adjustSize(maxSize);
 		maxSize_ = maxSize;
 	}
 	closeExceededConnections();
+	mutex_.unlock();
 }
 
 void NodeConnectionPool::add(std::auto_ptr<NodeConnection> connection) {
 	{
-		util::LockGuard<util::Mutex> guard(mutex_);
-
+		//util::LockGuard<util::Mutex> guard(mutex_);
+        mutex_.lock();
 		addressQueue_.push_back(connection->getRemoteAddress());
 
 		ConnectionMap::iterator it =
@@ -6210,11 +6225,13 @@ void NodeConnectionPool::add(std::auto_ptr<NodeConnection> connection) {
 		adjustSize(maxSize_);
 	}
 	closeExceededConnections();
+	mutex_.unlock();
 }
 
 std::auto_ptr<NodeConnection> NodeConnectionPool::pull(
 		const util::SocketAddress &address) {
-	util::LockGuard<util::Mutex> guard(mutex_);
+	//util::LockGuard<util::Mutex> guard(mutex_);
+	mutex_.lock();
 
 	std::binder2nd<SocketAddressEqual> pred =
 			std::bind2nd(SocketAddressEqual(), address);
@@ -6222,18 +6239,21 @@ std::auto_ptr<NodeConnection> NodeConnectionPool::pull(
 	AddressQueue::iterator addressIt =
 			std::find_if(addressQueue_.begin(), addressQueue_.end(), pred);
 	if (addressIt == addressQueue_.end()) {
+		mutex_.unlock();
 		return std::auto_ptr<NodeConnection>(NULL);
 	}
 	addressQueue_.erase(addressIt);
 
 	ConnectionMap::iterator connectionIt = connectionMap_.find(address);
 	if (connectionIt == connectionMap_.end()) {
+		mutex_.unlock();
 		return std::auto_ptr<NodeConnection>(NULL);
 	}
 
 	std::vector<NodeConnection*> &list = connectionIt->second;
 	if (list.empty()) {
 		connectionMap_.erase(connectionIt);
+		mutex_.unlock();
 		return std::auto_ptr<NodeConnection>(NULL);
 	}
 
@@ -6242,7 +6262,7 @@ std::auto_ptr<NodeConnection> NodeConnectionPool::pull(
 	if (list.empty()) {
 		connectionMap_.erase(connectionIt);
 	}
-
+    mutex_.unlock();
 	return connection;
 }
 
@@ -6271,7 +6291,8 @@ std::auto_ptr<NodeConnection> NodeConnectionPool::resolve(
 
 void NodeConnectionPool::clear() {
 	{
-		util::LockGuard<util::Mutex> guard(mutex_);
+		//util::LockGuard<util::Mutex> guard(mutex_);
+        mutex_.lock();
 
 		for (ConnectionMap::iterator i = connectionMap_.begin();
 				i != connectionMap_.end(); ++i) {
@@ -6285,6 +6306,7 @@ void NodeConnectionPool::clear() {
 		addressQueue_.clear();
 	}
 	closeExceededConnections();
+	mutex_.unlock();
 }
 
 void NodeConnectionPool::adjustSize(size_t maxSize) {
@@ -6314,7 +6336,8 @@ void NodeConnectionPool::adjustSize(size_t maxSize) {
 void NodeConnectionPool::closeExceededConnections() {
 	std::vector<NodeConnection*> connectionList;
 	{
-		util::LockGuard<util::Mutex> guard(mutex_);
+		//util::LockGuard<util::Mutex> guard(mutex_);
+		mutex_.lock();
 		connectionList.swap(exceededConnectionList_);
 	}
 
@@ -6328,6 +6351,7 @@ void NodeConnectionPool::closeExceededConnections() {
 		util::LockGuard<util::Mutex> guard(mutex_);
 		connectionList.swap(exceededConnectionList_);
 	}
+	mutex_.unlock();
 }
 
 
@@ -6376,17 +6400,23 @@ NodeResolver::NodeResolver(NodeConnectionPool &pool, bool passive,
 
 void NodeResolver::setConnectionConfig(
 		const NodeConnection::Config &connectionConfig) {
-	util::LockGuard<util::Mutex> guard(mutex_);
+	//util::LockGuard<util::Mutex> guard(mutex_);
+	mutex_.lock();
+	mutex_.unlock();
 	connectionConfig_ = connectionConfig;
 }
 
 void NodeResolver::setNotificationReceiveTimeoutMillis(int64_t timeout) {
-	util::LockGuard<util::Mutex> guard(mutex_);
+	//util::LockGuard<util::Mutex> guard(mutex_);
+	mutex_.lock();
+	mutex_.unlock();
 	notificationReceiveTimeoutMillis_ = timeout;
 }
 
 void NodeResolver::setProviderTimeoutMillis(int64_t timeout) {
-	util::LockGuard<util::Mutex> guard(mutex_);
+	//util::LockGuard<util::Mutex> guard(mutex_);
+	mutex_.lock();
+	mutex_.unlock();
 	providerTimeoutMillis_ = timeout;
 }
 
@@ -6398,12 +6428,16 @@ void NodeResolver::setPreferableConnectionPoolSize(int32_t size) {
 }
 
 void NodeResolver::setProtocolConfig(ProtocolConfig *protocolConfig) {
-	util::LockGuard<util::Mutex> guard(mutex_);
+	//util::LockGuard<util::Mutex> guard(mutex_);
+	mutex_.lock();
+	mutex_.unlock();
 	protocolConfig_ = protocolConfig;
 }
 
 void NodeResolver::close() {
-	util::LockGuard<util::Mutex> guard(mutex_);
+	//util::LockGuard<util::Mutex> guard(mutex_);
+	mutex_.lock();
+	mutex_.unlock();
 	releaseMasterCache(false);
 }
 
@@ -6658,11 +6692,13 @@ int32_t NodeResolver::getPartitionCount(ClusterInfo &clusterInfo) {
 	if (clusterInfo.getPartitionCount() == NULL) {
 		const size_t startTrialCount = connectionTrialCounter_;
 
-		util::LockGuard<util::Mutex> guard(mutex_);
+		//util::LockGuard<util::Mutex> guard(mutex_);
+		mutex_.lock();
 		prepareConnectionAndClusterInfo(clusterInfo, startTrialCount);
 		assert(clusterInfo.getPartitionCount() != NULL);
 
 		applyMasterCacheCounter(clusterInfo);
+		mutex_.unlock();
 	}
 
 	return *clusterInfo.getPartitionCount();
@@ -6673,11 +6709,13 @@ ContainerHashMode::Id NodeResolver::getContainerHashMode(
 	if (clusterInfo.getHashMode() == NULL) {
 		const size_t startTrialCount = connectionTrialCounter_;
 
-		util::LockGuard<util::Mutex> guard(mutex_);
+		//util::LockGuard<util::Mutex> guard(mutex_);
+		mutex_.lock();
 		prepareConnectionAndClusterInfo(clusterInfo, startTrialCount);
 		assert(clusterInfo.getHashMode() != NULL);
 
 		applyMasterCacheCounter(clusterInfo);
+		mutex_.unlock();
 	}
 
 	return *clusterInfo.getHashMode();
@@ -6687,11 +6725,13 @@ int64_t NodeResolver::getDatabaseId(ClusterInfo &clusterInfo) {
 	if (clusterInfo.getDatabaseId() == NULL) {
 		const size_t startTrialCount = connectionTrialCounter_;
 
-		util::LockGuard<util::Mutex> guard(mutex_);
+		// util::LockGuard<util::Mutex> guard(mutex_);
+		mutex_.lock();
 		prepareConnectionAndClusterInfo(clusterInfo, startTrialCount);
 		assert(clusterInfo.getDatabaseId() != NULL);
 
 		applyMasterCacheCounter(clusterInfo);
+		mutex_.unlock();
 	}
 
 	return *clusterInfo.getDatabaseId();
@@ -6707,14 +6747,15 @@ void NodeResolver::acceptDatabaseId(
 
 util::SocketAddress NodeResolver::getMasterAddress(ClusterInfo &clusterInfo) {
 	const size_t startTrialCount = connectionTrialCounter_;
-	util::LockGuard<util::Mutex> guard(mutex_);
-
+	//util::LockGuard<util::Mutex> guard(mutex_);
+    mutex_.lock();
 	if (masterAddress_.isEmpty()) {
 		prepareConnectionAndClusterInfo(clusterInfo, startTrialCount);
 		assert(!masterAddress_.isEmpty());
 	}
 
 	applyMasterCacheCounter(clusterInfo);
+	mutex_.unlock();
 	return masterAddress_;
 }
 
@@ -6722,7 +6763,8 @@ util::SocketAddress NodeResolver::getNodeAddress(
 		ClusterInfo &clusterInfo, int32_t partitionId, bool backupPreferred,
 		const util::SocketAddress *preferableHost) {
 	const size_t startTrialCount = connectionTrialCounter_;
-	util::LockGuard<util::Mutex> guard(mutex_);
+	//util::LockGuard<util::Mutex> guard(mutex_);
+	mutex_.lock();
 
 	const NodeAddressList *addressList = getNodeAddressList(
 			clusterInfo, partitionId, backupPreferred, startTrialCount, false);
@@ -6769,6 +6811,7 @@ util::SocketAddress NodeResolver::getNodeAddress(
 	}
 
 	applyMasterCacheCounter(clusterInfo);
+	mutex_.unlock();
 	return (*addressList)[index];
 }
 
@@ -6778,7 +6821,8 @@ void NodeResolver::getNodeAddressList(
 	addressList.clear();
 
 	const size_t startTrialCount = connectionTrialCounter_;
-	util::LockGuard<util::Mutex> guard(mutex_);
+	//util::LockGuard<util::Mutex> guard(mutex_);
+	mutex_.lock();
 
 	const NodeAddressList *baseAddressList = getNodeAddressList(
 			clusterInfo, partitionId, true, startTrialCount, false);
@@ -6787,10 +6831,13 @@ void NodeResolver::getNodeAddressList(
 	}
 
 	applyMasterCacheCounter(clusterInfo);
+	mutex_.unlock();
 }
 
 void NodeResolver::invalidateMaster(ClusterInfo &clusterInfo) {
-	util::LockGuard<util::Mutex> guard(mutex_);
+	//util::LockGuard<util::Mutex> guard(mutex_);
+	mutex_.lock();
+	mutex_.unlock();
 	invalidateMasterInternal(clusterInfo, false);
 }
 
@@ -7555,7 +7602,9 @@ void GridStoreChannel::apply(const Config &config) {
 	nodeResolver_.setPreferableConnectionPoolSize(
 			config.maxConnectionPoolSize_);
 
-	util::LockGuard<util::Mutex> guard(mutex_);
+	//util::LockGuard<util::Mutex> guard(mutex_);
+	mutex_.lock();
+	mutex_.unlock();
 	config_ = config;
 }
 
@@ -9209,7 +9258,8 @@ bool GSInterceptorManager::start(
 		const FunctionInfo &funcInfo, const ParameterList &args,
 		const Parameter &ret, InterceptorId &endId) {
 	CheckerScope checkerScope;
-	util::LockGuard<util::Mutex> guard(mutex_);
+	//util::LockGuard<util::Mutex> guard(mutex_);
+	mutex_.lock();
 
 	EntryList entryList;
 	InterceptorId count;
@@ -9218,11 +9268,13 @@ bool GSInterceptorManager::start(
 		Entry &entry = entryList[i];
 		if (entry.interceptor_->start(funcInfo, args, ret)) {
 			endId = i + 1;
+			mutex_.unlock();
 			return true;
 		}
 	}
 
 	endId = count;
+	mutex_.unlock();
 	return false;
 }
 
@@ -9230,7 +9282,8 @@ void GSInterceptorManager::finish(
 		const FunctionInfo &funcInfo, const ParameterList &args,
 		InterceptorId endId) {
 	CheckerScope checkerScope;
-	util::LockGuard<util::Mutex> guard(mutex_);
+	//util::LockGuard<util::Mutex> guard(mutex_);
+	mutex_.lock();
 
 	EntryList entryList;
 	InterceptorId count;
@@ -9243,20 +9296,23 @@ void GSInterceptorManager::finish(
 		}
 		entry.interceptor_->finish(funcInfo, args);
 	}
+	mutex_.unlock();
 }
 
 bool GSInterceptorManager::filterByResourceType(GSResourceType::Id type) {
-	util::LockGuard<util::Mutex> guard(mutex_);
+	//util::LockGuard<util::Mutex> guard(mutex_);
+    mutex_.lock();
 
 	EntryList entryList;
 	InterceptorId count;
 	getActiveEntryList(guard, type, entryList, count);
-
+    mutex_.unlock();
 	return (count <= 0);
 }
 
 void GSInterceptorManager::activate(InterceptorId id, bool enabled) {
-	util::LockGuard<util::Mutex> guard(mutex_);
+	// util::LockGuard<util::Mutex> guard(mutex_);
+	mutex_.lock();
 	if (id >= entryCount_) {
 		assert(false);
 		GS_CLIENT_THROW_ERROR(GS_ERROR_CC_INTERNAL_ERROR, "");
@@ -9269,11 +9325,13 @@ void GSInterceptorManager::activate(InterceptorId id, bool enabled) {
 	}
 
 	entry.enabled_ = enabled;
+	mutex_.unlock();
 }
 
 GSInterceptorManager::InterceptorId
 GSInterceptorManager::add(GSInterceptor &interceptor) {
-	util::LockGuard<util::Mutex> guard(mutex_);
+	//util::LockGuard<util::Mutex> guard(mutex_);
+	mutex_.lock();
 	for (InterceptorId i = 0; i < MAX_INTERCEPTOR_COUNT; i++) {
 		Entry &entry = entryList_[i];
 		if (entry.interceptor_ == NULL) {
@@ -9282,12 +9340,14 @@ GSInterceptorManager::add(GSInterceptor &interceptor) {
 			entry.interceptor_ = &interceptor;
 			entryCount_ = static_cast<InterceptorId>(
 					std::max<uint64_t>(entryCount_, i + 1));
+			mutex_.unlock();
 			return entry.id_;
 		}
 	}
 
 	assert(false);
 	GS_CLIENT_THROW_ERROR(GS_ERROR_CC_INTERNAL_ERROR, "");
+	mutex_.unlock();
 }
 
 void GSInterceptorManager::remove(InterceptorId id) {
@@ -9296,8 +9356,10 @@ void GSInterceptorManager::remove(InterceptorId id) {
 		GS_CLIENT_THROW_ERROR(GS_ERROR_CC_INTERNAL_ERROR, "");
 	}
 
-	util::LockGuard<util::Mutex> guard(mutex_);
+	//util::LockGuard<util::Mutex> guard(mutex_);
+	mutex_.lock();
 	entryList_[id] = Entry();
+	mutex_.unlock();
 }
 
 void GSInterceptorManager::getActiveEntryList(
@@ -9468,7 +9530,8 @@ GSGridStore* GSGridStoreFactoryTag::getGridStore(
 	if (data_.get() == NULL) {
 		return NULL;
 	}
-	util::LockGuard<util::Mutex> guard(data_->mutex_);
+	//util::LockGuard<util::Mutex> guard(data_->mutex_);
+	mutex_.lock();
 
 	Properties propertiesObj(properties, propertyCount);
 	data_->configLoader_.applyStoreConfig(propertiesObj);
@@ -9492,7 +9555,7 @@ GSGridStore* GSGridStoreFactoryTag::getGridStore(
 		channel = it->second;
 		channel->apply(data_->channelConfig_);
 	}
-
+    mutex_.unlock();
 	return new GSGridStore(*channel, source.createContext());
 }
 
@@ -9503,16 +9566,20 @@ void GSGridStoreFactoryTag::setProperties(
 		return;
 	}
 
-	util::LockGuard<util::Mutex> guard(data_->mutex_);
+	//util::LockGuard<util::Mutex> guard(data_->mutex_);
+	mutex_.lock();
 	setPropertiesInternal(guard, forInitial, properties, propertyCount);
+	mutex_.unlock();
 }
 
 void GSGridStoreFactoryTag::prepareConfigFile() throw() try {
 	if (data_.get() == NULL) {
 		return;
 	}
-	util::LockGuard<util::Mutex> guard(data_->mutex_);
+	//util::LockGuard<util::Mutex> guard(data_->mutex_);
+	mutex_.lock();
 	if (data_->configLoader_.isPrepared()) {
+		mutex_.unlock();
 		return;
 	}
 
@@ -9524,6 +9591,7 @@ void GSGridStoreFactoryTag::prepareConfigFile() throw() try {
 		std::exception e;
 		data_->configLoader_.handleConfigError(e);
 	}
+	mutex_.unlock();
 }
 catch (...) {
 }
